@@ -1,4 +1,4 @@
-module tidb
+module trans_client
 
 go 1.12
 

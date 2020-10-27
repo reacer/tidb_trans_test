@@ -1,115 +1,77 @@
 package main
 
 import (
-	"bufio"
 	"database/sql"
 	"flag"
 	"fmt"
-	"os"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
 var (
-	user   = flag.String("user", "root", "db user")
-	port   = flag.Int("port", 4000, "db port")
-	passwd = flag.String("passwd", "", "db password")
-	host   = flag.String("host", "127.0.0.1", "db host")
-	dbName = flag.String("db", "zenos", "db name")
+	user     = flag.String("user", "root", "db user")
+	port     = flag.Int("port", 4000, "db port")
+	passwd   = flag.String("passwd", "", "db password")
+	host     = flag.String("host", "127.0.0.1", "db host")
+	dbName   = flag.String("db", "zenos", "db name")
+	sqlfile1 = flag.String("sql1", "data/1.sql", "the first sql file")
+	sqlfile2 = flag.String("sql2", "data/2.sql", "the second sql file")
+	initsql  = flag.String("init_sql", "data/init.sql", "init database")
 )
 
-func ReadSQLFile(name string) []string {
-	f, err := os.Open(name)
+// ExecSqls 执行sqls
+func ExecSqls(db *sql.DB, sqls chan string) chan error {
+	tx, err := db.Begin()
 	if err != nil {
 		panic(err)
 	}
-	reader := bufio.NewReader(f)
-	sqls := make([]string, 0)
-	for {
-		if sql, _, err := reader.ReadLine(); err == nil {
-			sqls = append(sqls, string(sql))
-		} else {
-			break
+	ans := make(chan error)
+	go func() {
+		for sql := range sqls {
+			fmt.Printf("exec sql=%s\n", sql)
+			_, err := tx.Exec(sql)
+			if err != nil {
+				tx.Rollback()
+			}
+			ans <- err
 		}
-	}
-	return sqls
-}
-func GenerateFirstSeq(m, n int) []byte {
-	ans := make([]byte, m+n)
-	for i := 0; i < m; i++ {
-		ans[i] = '1'
-	}
-	for i := m; i < m+n; i++ {
-		ans[i] = '2'
-	}
+		err := tx.Commit()
+		if err != nil {
+			panic(err)
+		}
+	}()
 	return ans
+
 }
-func reverse(data []byte, i int) {
-	j := len(data) - 1
-	for i < j {
-		data[i], data[j] = data[j], data[i]
-		i++
-		j--
+
+// InitDBData 初始化DB数据 todo
+func InitDBData() error {
+	dbSource := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", *user, *passwd, *host, *port, *dbName)
+	db := GetDB(dbSource)
+	if db == nil {
+		panic("GetDBSource failed")
 	}
-}
-func NextSeqs(data []byte) []byte {
-	if len(data) <= 1 {
-		return data
-	}
-	i := len(data) - 2
-	for ; i >= 0 && data[i] >= data[i+1]; i-- {
-	}
-	if i >= 0 {
-		j := len(data) - 1
-		for ; j >= 0 && data[j] <= data[i]; j-- {
+	defer db.Close()
+	sqls := ReadSQLFile(*initsql)
+
+	for _, sql := range sqls {
+		_, err := db.Exec(sql)
+		if err != nil {
+
+			panic(err)
 		}
-		data[i], data[j] = data[j], data[i]
 	}
-	reverse(data, i+1)
-	return data
+	return nil
 }
 
-type TransactionExector struct {
-	db *sql.DB
-	tx *sql.Tx
-}
-
-func NewTransactionExector(db *sql.DB) *TransactionExector {
-	return &TransactionExector{
-		db: db,
-	}
-}
-
-func (t *TransactionExector) Begin() error {
-	var err error
-	t.tx, err = t.db.Begin()
-	return err
-}
-func (t *TransactionExector) Exec(sql string) error {
-	_, err := t.tx.Exec(sql)
-	return err
-}
-func (t *TransactionExector) Commit() error {
-	return t.tx.Commit()
-}
-func (t *TransactionExector) Rollback() error {
-	return t.tx.Rollback()
-}
-func GetDB(addr string) *sql.DB {
-	db, err := sql.Open("mysql", addr)
-	if err != nil {
-		return nil
-	}
-	return db
-}
-func ExecSql(tx *TransactionExector, sql string) error {
-	err := tx.Exec(sql)
-	return err
-}
+// SaveDBData 保存数据 todo
+func SaveDBData(db *sql.DB) {}
 func main() {
 
-	sqls1 := ReadSQLFile("data/1.sql")
-	sqls2 := ReadSQLFile("data/2.sql")
+	InitDBData()
+	sqls1 := ReadSQLFile(*sqlfile1)
+	sqls2 := ReadSQLFile(*sqlfile2)
 	firstSeq := GenerateFirstSeq(len(sqls1), len(sqls2))
 	seq := make([]byte, len(firstSeq))
 	dbSource := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", *user, *passwd, *host, *port, *dbName)
@@ -119,31 +81,44 @@ func main() {
 	defer db2.Close()
 	copy(seq, firstSeq)
 	for {
-		fmt.Printf("current seq=%s\n", string(seq))
-		tx1 := NewTransactionExector(db1)
-		tx2 := NewTransactionExector(db2)
-		tx1.Begin()
-		tx2.Begin()
+		fmt.Printf("current seques=%v\n", seq)
+		chSqls1 := make(chan string)
+		chSqls2 := make(chan string)
+		ch1 := ExecSqls(db1, chSqls1)
+		ch2 := ExecSqls(db2, chSqls2)
 		i := 0
 		j := 0
 		for _, item := range seq {
 			//todo 可能会死锁
-			var tx *TransactionExector
+
 			sql := ""
+			var ch chan error
 			if item == '1' {
-				tx = tx1
 				sql = sqls1[i]
+				chSqls1 <- sql
+				ch = ch1
 				i++
 			} else {
-				tx = tx2
 				sql = sqls2[j]
+				chSqls2 <- sql
+				ch = ch2
 				j++
 			}
-			tx.Exec(sql)
-		}
-		tx1.Commit()
-		tx2.Commit()
 
+			select {
+			case <-time.After(1 * time.Second):
+				panic("timeout")
+			case err := <-ch:
+				if err != nil {
+					panic(err)
+				}
+			}
+		}
+
+		//todo save current result
+		SaveDBData(db1)
+		//todo reset db data
+		InitDBData()
 		seq = NextSeqs(seq)
 		if string(seq) == string(firstSeq) {
 			break

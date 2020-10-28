@@ -22,7 +22,7 @@ var (
 
 // ExecSqls 执行sqls
 func ExecSqls(db *sql.DB, sqls chan string) chan error {
-	tx, err := db.Begin()
+	tx, err := db.Begin() //事务开始
 	if err != nil {
 		panic(err)
 	}
@@ -42,7 +42,6 @@ func ExecSqls(db *sql.DB, sqls chan string) chan error {
 		}
 	}()
 	return ans
-
 }
 
 // InitDBData 初始化DB数据 todo
@@ -58,7 +57,6 @@ func InitDBData() error {
 	for _, sql := range sqls {
 		_, err := db.Exec(sql)
 		if err != nil {
-
 			panic(err)
 		}
 	}
@@ -69,58 +67,58 @@ func InitDBData() error {
 func SaveDBData(db *sql.DB) {}
 func main() {
 
-	InitDBData()
-	sqls1 := ReadSQLFile(*sqlfile1)
-	sqls2 := ReadSQLFile(*sqlfile2)
-	firstSeq := GenerateFirstSeq(len(sqls1), len(sqls2))
-	seq := make([]byte, len(firstSeq))
+	InitDBData()                                         // 执行DB初始化语句
+	sqls1 := ReadSQLFile(*sqlfile1)                      // 读取事务一的sql语句列表
+	sqls2 := ReadSQLFile(*sqlfile2)                      // 读取事务二的sql语句列表
+	firstSeq := GenerateFirstSeq(len(sqls1), len(sqls2)) // 生成第一个 两个事务语句执行的序列
 	dbSource := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", *user, *passwd, *host, *port, *dbName)
-	db1 := GetDB(dbSource)
-	db2 := GetDB(dbSource)
+	db1 := GetDB(dbSource) // 获取事务一的DB连接
+	db2 := GetDB(dbSource) // 获取事务二的DB连接
 	defer db1.Close()
 	defer db2.Close()
-	copy(seq, firstSeq)
+	curSeq := make([]byte, len(firstSeq)) // 当前两个事务执行的sql序列
+	copy(curSeq, firstSeq)
 	for {
-		fmt.Printf("current seques=%v\n", seq)
+		fmt.Printf("current seques=%s\n", string(curSeq))
 		chSqls1 := make(chan string)
 		chSqls2 := make(chan string)
-		ch1 := ExecSqls(db1, chSqls1)
-		ch2 := ExecSqls(db2, chSqls2)
+		ch1 := ExecSqls(db1, chSqls1) // 开始事务一
+		ch2 := ExecSqls(db2, chSqls2) // 开始事务二
 		i := 0
 		j := 0
-		for _, item := range seq {
+		for _, item := range curSeq {
 			//todo 可能会死锁
 
 			sql := ""
 			var ch chan error
-			if item == '1' {
+			if item == '1' { // 当前为事务一的SQL语句
 				sql = sqls1[i]
-				chSqls1 <- sql
+				chSqls1 <- sql // 将事务一执行的SQL语句发送给事务一执行
 				ch = ch1
 				i++
-			} else {
+			} else { // 当前为事务二的SQL语句
 				sql = sqls2[j]
-				chSqls2 <- sql
+				chSqls2 <- sql // 将事务二执行的SQL语句发送给事务一执行
 				ch = ch2
 				j++
 			}
 
 			select {
-			case <-time.After(1 * time.Second):
+			case <-time.After(1 * time.Second): // 事务一或二SQL语句执行超时
 				panic("timeout")
 			case err := <-ch:
-				if err != nil {
+				if err != nil { // 事务一或二 某个SQL语句执行失败
 					panic(err)
 				}
 			}
 		}
 
-		//todo save current result
+		//todo 保存当前结果
 		SaveDBData(db1)
-		//todo reset db data
+		//todo 重新初始化DB数据
 		InitDBData()
-		seq = NextSeqs(seq)
-		if string(seq) == string(firstSeq) {
+		curSeq = NextSeqs(curSeq)               // 获取下一个事务SQL语句执行顺序
+		if string(curSeq) == string(firstSeq) { // 所有SQL执行顺序全部执行
 			break
 		}
 	}
